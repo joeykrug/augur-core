@@ -2,221 +2,151 @@
 
 extern controller: [lookup:[int256]:int256, assertIsWhitelisted:[int256]:int256]
 
-BRANCHES = self.controller.lookup('branches')
-extern branches: [addCurrency:[int256,int256,int256,int256]:int256, addMarketToBranch:[int256,int256]:int256, addNewETHContract:[int256,int256]:int256, disableCurrency:[int256,int256]:int256, getBaseReporters:[int256]:int256, getBranchByNum:[int256]:int256, getBranchCurrency:[int256,int256]:int256, getBranchWallet:[int256,int256]:int256, getBranches:[]:int256[], getBranchesStartingAt:[int256]:int256[], getCreationDate:[int256]:int256, getCurrencyActive:[int256,int256]:int256, getCurrencyByContract:[int256,int256]:int256, getCurrencyRate:[int256,int256]:int256, getCurrentETHWrapper:[int256]:int256, getEventForkedOver:[int256]:int256, getForkPeriod:[int256]:int256, getForkTime:[int256]:int256, getInitialBalance:[int256,int256,int256]:int256, getMarketIDsInBranch:[int256,int256,int256]:int256[], getMinTradingFee:[int256]:int256, getMostRecentChild:[int256]:int256, getNumBranches:[]:int256, getNumCurrencies:[int256]:int256, getNumMarketsBranch:[int256]:int256, getParent:[int256]:int256, getParentPeriod:[int256]:int256, getPeriodLength:[int256]:int256, getVotePeriod:[int256]:int256, incrementPeriod:[int256]:int256, initializeBranch:[int256,int256,int256,int256,int256,int256,int256,int256]:int256, reactivateCurrency:[int256,int256]:int256, removeLastCurrency:[int256]:int256, replaceCurrency:[int256,int256,int256,int256,int256]:int256, setBaseReporters:[int256,int256]:int256, setController:[address]:int256, setEventForkedOver:[int256,int256]:int256, setForkPeriod:[int256]:int256, setInitialBalance:[int256,int256,int256,int256]:int256, setMostRecentChild:[int256,int256]:int256, suicideFunds:[address]:_, updateCurrencyRate:[int256,int256,int256,int256]:int256, updateNumCurrencies:[int256,int256]:int256]
+EVENTS = self.controller.lookup('events')
+extern events: [a:[]:_]
 
-# todo note in final version should be actual repcontract address on the mainnet
-REPCONTRACT = self.controller.lookup('repContract')
-extern repContract: [allowance:[address,address]:uint256, approve:[address,uint256]:uint256, balanceOf:[address]:uint256, decimals:[]:uint256, getRidOfDustForLaunch:[]:int256, getSeeded:[]:uint256, name:[]:uint256, setSaleDistribution:[address[],uint256[]]:uint256, symbol:[]:uint256, totalSupply:[]:uint256, transfer:[address,uint256]:uint256, transferFrom:[address,address,uint256]:uint256]
+REGISTRATION_TOKEN = self.controller.lookup('registrationToken')
+extern registrationToken: [b:[]:_]
 
 inset('../macros/refund.sem')
-
-# Storage of all data associated with reporters
-    # Reporting index is the branch
-    # Reputation index is the index of the reporter
-    # RepIDtoIndex returns a reporter's reputation[] index given their reputationID as the key
-    # total rep is all the rep in augur
-    # active rep is the fxpAmount which is actually active
-    # fork is the child branch of a parent which forked
-    # fxpDormant rep stores fxpDormant rep values
-    # reportedOnNonFinalRoundTwoEvent is the eventID if a person reported on a round 2 event before it was in the second round [i.e. the first reporting backstop], they cannot convert their rep to dormant or send rep until they've finished the resolution process for that round 2 event, set this to 0 once the event is final
-data Reporting[](reputation[](repValue, reporterID), numberReporters, repIDtoIndex[], totalRep, dormantRep[](repValue, reporterID), activeRep, reportedOnNonFinalRoundTwoEvent[])
+inset('../macros/safeMath.sem')
+inset('../macros/unitConversions.sem')
 
 data controller
+data reportingPeriodSeconds
+data reportingDisputePeriodSeconds
+data reportsPerEvent
+# userReports[branch][reportingWindow][reporterAddress]
+data userReports[][][](markets[], count)
+# marketReporterCount[branch][reportingWindow][market] => count
+data marketReporterCount[][][]
 
 def init():
-    self.controller = 0x01
-    REPCONTRACT = self.controller.lookup('repContract')
-    self.Reporting[1010101].repIDtoIndex[1010101] = 0
-    redistributionRep = REPCONTRACT.balanceOf(0x0000000000000000000000000000000000000000)
-    self.Reporting[1010101].reputation[0].repValue = redistributionRep
-    self.Reporting[1010101].reputation[0].reporterID = 1010101
-    self.Reporting[1010101].dormantRep[0].reporterID = 1010101
-    self.Reporting[1010101].numberReporters = 2
-    self.Reporting[1010101].repIDtoIndex[msg.sender] = 1
-    self.Reporting[1010101].reputation[1].repValue = 0
-    self.Reporting[1010101].reputation[1].reporterID = msg.sender
-    self.Reporting[1010101].dormantRep[1].reporterID = msg.sender
-    self.Reporting[1010101].repIDtoIndex[msg.sender] = 1
-    self.Reporting[1010101].activeRep += redistributionRep
-    self.Reporting[1010101].totalRep += redistributionRep
+    self.controller = 0x0
+    self.reportingPeriodSeconds = 21 * SECONDS_PER_DAY
+    self.reportingDisputePeriodSeconds = 3 * SECONDS_PER_DAY
+    self.reportsPerEvent = 7
 
-def getReportedOnNonFinalRoundTwoEvent(branch, reporter):
-    return(self.Reporting[branch].reportedOnNonFinalRoundTwoEvent[reporter])
+def any():
+    refund()
 
-def setReportedOnNonFinalRoundTwoEvent(branch, event, reporter):
+# FIXME: gas issue, may cost a lot to run but should come with a hefty gas refund
+# CONSIDER: if we dis-allow multiple registration token redemptions then we can just set the `.count` to 0
+def clearUserReports(branch, reportingWindow, reporterAddress):
     self.controller.assertIsWhitelisted(msg.sender)
-    self.Reporting[branch].reportedOnNonFinalRoundTwoEvent[reporter] = event
+    i = 0
+    while(i < self.userReports[branch][reportingWindow][reporterAddress].count):
+        market = self.userReports[branch][reportingWindow][reporterAddress].markets[i]
+        self.userReports[branch][reportingWindow][reporterAddress].markets[i] = 0
+        self.marketReporterCount[branch][reportingWindow][market] -= 1
+        i += 1
+    self.userReports[branch][reportingWindow][reporterAddress].count = 0
     return(1)
 
-# @return fxp
-def getActiveRep(branch):
-    return(self.Reporting[branch].activeRep)
-
-def adjustActiveRep(branch, fxpAmount):
-    self.controller.assertIsWhitelisted(msg.sender)
-    self.Reporting[branch].activeRep += fxpAmount
-    return(1)
-
-# @return fxp
-def getRepByIndex(branch, repIndex):
-    return(self.Reporting[branch].reputation[repIndex].repValue)
-
-# @return fxp
-def getRepBalance(branch, address):
-    repIndex = self.Reporting[branch].repIDtoIndex[address]
-    if(!repIndex and self.Reporting[branch].reputation[repIndex].reporterID != address):
-        return(0)
-    return(self.Reporting[branch].reputation[repIndex].repValue)
-
-def getDormantRepByIndex(branch, repIndex):
-    return(self.Reporting[branch].dormantRep[repIndex].repValue)
-
-# getDormantRepBalance
-# @return fxp
-def balanceOfReporter(branch, address):
-    repIndex = self.Reporting[branch].repIDtoIndex[address]
-    if(!repIndex and self.Reporting[branch].reputation[repIndex].reporterID != address):
-        return(0)
-    return(self.Reporting[branch].dormantRep[repIndex].repValue)
-
-# return total supply of fxpDormant rep
-# @return fxp
-def totalSupply(branch):
-    return(self.Reporting[branch].totalRep - self.Reporting[branch].activeRep)
-
-def getReporterID(branch, index):
-    return(self.Reporting[branch].reputation[index].reporterID)
-
-def getTotalRep(branch):
-    return(self.Reporting[branch].totalRep)
-
-# will return 0s for array values after it's looped through all the ones you
-# have an actual balance in
-def getReputation(address):
-    branchListCount = BRANCHES.getNumBranches()
-    if(address):
-        branches = array(2 * branchListCount)
-        branchList = array(branchListCount)
-        branchList = BRANCHES.getBranches(outitems = branchListCount)
-        i = 0
-        b = 0
-        while(i < branchListCount):
-            branch = branchList[i]
-            balance = self.getRepBalance(branch, address)
-            if(balance != 0):
-                branches[b] = branch
-                branches[b + 1] = balance
-                b += 2
-            i += 1
-    else:
-        address = msg.sender
-        branches = array(2 * branchListCount)
-        branchList = array(branchListCount)
-        branchList = BRANCHES.getBranches(outitems = branchListCount)
-        i = 0
-        b = 0
-        while(i < branchListCount):
-            branch = branchList[i]
-            balance = self.getRepBalance(branch, address)
-            if(balance != 0):
-                branches[b] = branch
-                branches[b + 1] = balance
-                b += 2
-            i += 1
-    return(branches: arr)
-
-def getNumberReporters(branch):
-    return(self.Reporting[branch].numberReporters)
-
-def repIDToIndex(branch, repID):
-    repIndex = self.Reporting[branch].repIDtoIndex[repID]
-    if(self.Reporting[branch].reputation[repIndex].reporterID != repID):
+def noteUserReport(market, payoutNumerators, reporter):
+    # trustlessly verify that the user has in fact reported on the given market, this way we don't have to whitelist all markets/reporting tokens
+    market.assertCanBeReportedOn()
+    reportingToken = market.getReportingToken()
+    reportingToken.assertReporterHasReported(payoutNumerators, reporter)
+    branch = market.getBranch()
+    window = self.getCurrentReportingWindow()
+    # always give credit for events in all-reporters phase
+    if (market.getReportingPhase() == 3):
+        self.privateNoteUserReport(market, reporter)
+    # only events in limited/all reporting phase are valid to report on
+    elif (market.getReportingPhase() != 2):
         ~invalid()
-    return(repIndex)
+    # only give credit for limited reporter markets up to the max reporters for that market
+    marketReporterCount = self.marketReporterCount[branch][window][reporter]
+    maxReportsPerLimitedReporterMarket = self.getMaxReportsPerLimitedReporterMarket(branch, window)
+    if (marketReporterCount < maxReportsPerLimitedReporterMarket):
+        self.privateNoteUserReport(market, reporter)
 
-def setInitialReporters(branch):
-    self.controller.assertIsWhitelisted(msg.sender)
-    # add branch as a "reporter"
-    self.Reporting[branch].numberReporters = 1
-    self.Reporting[branch].repIDtoIndex[branch] = 0
-    self.Reporting[branch].reputation[0].repValue = 0
-    self.Reporting[branch].reputation[0].reporterID = branch
-    self.Reporting[branch].dormantRep[0].reporterID = branch
-    return(1)
+####
+#### Helpers
+####
 
-def addReporter(branch, sender, fxpAmount, fxpDormant, fxpRepToBonderOrBranch):
-    self.controller.assertIsWhitelisted(msg.sender)
-    reporterIndex = self.Reporting[branch].numberReporters
-    self.Reporting[branch].repIDtoIndex[sender] = reporterIndex
-    self.Reporting[branch].reputation[reporterIndex].repValue = fxpAmount
-    self.Reporting[branch].reputation[reporterIndex].reporterID = sender
-    self.Reporting[branch].dormantRep[reporterIndex].reporterID = sender
-    self.Reporting[branch].dormantRep[reporterIndex].repValue = fxpDormant
-    self.Reporting[branch].activeRep += fxpAmount + fxpRepToBonderOrBranch
-    self.Reporting[branch].totalRep += fxpAmount + fxpDormant + fxpRepToBonderOrBranch
-    self.Reporting[branch].numberReporters += 1
-    return(1)
+####
+#### Getters
+####
 
-def addRep(branch, index, fxpValue):
-    self.controller.assertIsWhitelisted(msg.sender)
-    self.Reporting[branch].reputation[index].repValue += fxpValue
-    return(1)
+def isInReportingPhase():
+    startTime = self.getCurrentReportingWindowStartTimestamp()
+    endTime = startTime + self.reportingPeriodSeconds
+    nowIsAfterStartTime = block.timestamp > startTime
+    nowIsBeforeEndTime = block.timestamp < endTime
+    return(nowIsAfterStartTime && nowIsBeforeEndTime)
 
-def subtractRep(branch, index, fxpValue):
-    self.controller.assertIsWhitelisted(msg.sender)
-    self.Reporting[branch].reputation[index].repValue -= fxpValue
-    return(1)
+def isInReportingDisputePhase():
+    startTime = self.getCurrentReportingWindowStartTimestamp() + self.reportingPeriodSeconds
+    endTime = startTime + self.reportingDisputePeriodSeconds
+    nowIsAfterStartTime = block.timestamp > startTime
+    nowIsBeforeEndTime = block.timestamp < endTime
+    return(nowIsAfterStartTime && nowIsBeforeEndTime)
 
-### Test Faucet Function that needs to be removed at launch TODO
-def setRep(branch, index, fxpNewRep):
-    self.controller.assertIsWhitelisted(msg.sender)
-    oldRep = self.Reporting[branch].reputation[index].repValue
-    self.Reporting[branch].reputation[index].repValue = fxpNewRep
-    self.Reporting[branch].activeRep += fxpNewRep - oldRep
-    self.Reporting[branch].totalRep += fxpNewRep - oldRep
-    return(1)
+def getReportingPeriodDurationInSeconds():
+    return(self.reportingPeriodSeconds + self.reportingDisputePeriodSeconds)
 
-def addDormantRep(branch, index, fxpValue):
-    self.controller.assertIsWhitelisted(msg.sender)
-    self.Reporting[branch].dormantRep[index].repValue += fxpValue
-    return(1)
+def getCurrentReportingWindow():
+    return(self.getReportingWindowForTimestamp(block.timestamp))
 
-def subtractDormantRep(branch, index, fxpValue):
-    self.controller.assertIsWhitelisted(msg.sender)
-    self.Reporting[branch].dormantRep[index].repValue -= fxpValue
-    return(1)
+def getReportingWindowForTimestamp(timestamp):
+    return(timestamp / self.getReportingPeriodDurationInSeconds())
 
-def claimInitialRepFromRepContract():
-    branch = 1010101
-    sender = msg.sender
-    dormantRep = REPCONTRACT.balanceOf(sender)
-    if(!dormantRep):
+def getCurrentReportingWindowStartTimestamp():
+    return(self.getCurrentReportingWindow() * self.getReportingPeriodDurationInSeconds())
+
+def getCurrentReportingWindowEndTimestamp():
+    return(self.getCurrentReportingWindowStartTimestamp() + self.getReportingPeriodDurationInSeconds())
+
+def getTargetReportsPerLimitedReporterMarket(branch, reportingWindow):
+    limitedReporterMarketCount = EVENTS.getNumberOfLimitedReporterEvents(branch, reportingWindow)
+    reportersThisSession = REGISTRATION_TOKEN.totalSupply(branch, reportingWindow)
+    minimumReportsPerMarket = 7
+
+    if (reportersThisSession > (minimumReportsPerMarket * limitedReporterMarketCount)):
+        factor = reportersThisSession / (minimumReportsPerMarket * limitedReporterMarketCount)
+        minimumReportsPerMarket = minimumReportsPerMarket * factor
+
+def getMaxReportsPerLimitedReporterMarket(branch, reportingWindow):
+    return(self.getTargetReportsPerLimitedReporterMarket(branch, reportingWindow) + 2)
+
+def getRequiredReportsPerReporterForLimitedReportingMarkets(branch, reportingWindow):
+    targetReportsPerMarket = self.getTargetReportsPerLimitedReporterMarket(branch, reportingWindow)
+    limitedReporterMarketCount = EVENTS.getNumberOfLimitedReporterEvents(branch, reportingWindow)
+    reportersThisSession = REGISTRATION_TOKEN.totalSupply(branch, reportingWindow)
+    reportsPerReporter = targetReportsPerMarket * limitedReporterMarketCount / reportersThisSession
+    return(reportsPerReporter)
+
+def getRequiredReportsPerReporter(branch, reportingWindow):
+    limitedMarketReportsPerReporter = getRequiredReportsPerReporterForLimitedReportingMarkets(branch, reportingWindow)
+    allReporterMarketsCount = EVENTS.getNumberOfAllReporterEvents(branch, reportingWindow)
+    return(allReporterMarketsCount + limitedMarketReportsPerReporter)
+
+####
+#### Asserts
+####
+
+# CONSIDER: if an event moves out of a reporting period (e.g., due to a fork) this may start to return an incorrect result; can events move out of a reporting window _during_ a reporting window?
+def assertDoneReporting(branch, reportingWindow, reporterAddress):
+    totalAllReporterEvents = EVENTS.getNumberOfAllReporterEvents(branch, reportingWindow)
+    totalLimitedReporterEvents = EVENTS.getNumberOfLimitedReporterEvents(branch, reportingWindow)
+    targetReports = self.getTargetReportsPerReporter(branch, reportingWindow)
+    # TODO: test this to make sure that a user can't run out of events without reaching target
+    if (self.userReports[branch][reportingWindow][reporterAddress].reportedEventsCount < targetReports):
         ~invalid()
-    if(dormantRep != REPCONTRACT.allowance(sender, self)):
-        ~invalid()
-    if(!REPCONTRACT.transferFrom(sender, 0x0000000000000000000000000000000000000000, dormantRep)):
-        ~invalid()
-    if(self.Reporting[branch].repIDtoIndex[sender]):
-        ~invalid()
-    reporterIndex = self.Reporting[branch].numberReporters
-    self.Reporting[branch].repIDtoIndex[sender] = reporterIndex
-    self.Reporting[branch].reputation[reporterIndex].reporterID = sender
-    self.Reporting[branch].dormantRep[reporterIndex].reporterID = sender
-    self.Reporting[branch].dormantRep[reporterIndex].repValue = dormantRep
-    self.Reporting[branch].totalRep += dormantRep
-    self.Reporting[branch].numberReporters += 1
-    return(1)
 
-# @controller
-def setController(newController: address):
-    if(msg.sender != self.controller):
-        ~invalid()
-    self.controller = newController
-    return(1)
+####
+#### Private
+####
 
-# @controller
-def suicideFunds(to: address):
-    if(msg.sender != self.controller):
-        ~invalid()
-    suicide(to)
+def privateNoteUserReport(market, reporter):
+    assertPrivateCall()
+    branch = market.getBranch()
+    window = self.getCurrentReportingWindow()
+    if (self.userReports[branch][window][reporter].markets[market]):
+        return
+    oldCount = self.userReports[branch][window][reporter].count
+    self.userReports[branch][window][reporter].count = safeAdd(oldCount, 1)
+    self.userReports[branch][window][reporter].markets[market] = 1
+    self.marketReporterCount[branch][window][market] += 1

@@ -1,0 +1,82 @@
+# Copyright (C) 2015 Forecast Foundation OU, full GPL notice in LICENSE
+
+extern controller: [lookup:[int256]:int256, assertIsWhitelisted:[int256]:int256]
+
+REPUTATION_TOKEN = self.controller.lookup('reputationToken')
+extern reporting: [c:[]:_]
+
+REPORTING = self.controller.lookup('reporting')
+extern reporting: [c:[]:_]
+
+data controller
+data shareSettlementPerEthFee[]
+data validityBondInAttoeth[]
+
+def init():
+    self.controller = 0x0
+
+def any():
+    refund()
+
+def getValidityBond(reportingWindow):
+    currentValidityBondInAttoeth = self.validityBondInAttoeth[reportingWindow]
+    if (currentValidityBondInAttoeth):
+        return(currentValidityBondInAttoeth)
+    # TODO: get the real data for this
+    indeterminateMarketsInPreviousWindow = 10
+    # TODO: get the real data for this
+    totalMarketsInPreviousWindow = 1000
+    previousValidityBondInAttoeth = self.validityBondInAttoeth[reportingWindow - 1]
+    if (!previousValidityBondInAttoeth):
+        previousValidityBondInAttoeth = 1*10**16
+    targetIndeterminateMarketsPerHundred = 1
+    currentValidityBondInAttoeth = previousValidityBondInAttoeth * targetIndeterminateMarketsPerHundred * totalMarketsInPreviousWindow / indeterminateMarketsInPreviousWindow / 100
+    self.validityBondInAttoeth[reportingWindow] = currentValidityBondInAttoeth
+    return(newValidityBondInAttoeth)
+
+def getFinalizationGasCosts():
+    # TODO: figure out what the number actually is
+    return(100000)
+
+def getTargetReporterGasCosts():
+    # TODO: get number of registration tokens issued last period
+    # TODO: get target reporter count + wiggle room
+    # TODO: calculate estimated reporters per market
+    estimatedReportsPerMarket = 10
+    # TODO: figure out what the number actually is
+    gasToReport = 100000
+    # we double it to ensure we have more than enough rather than not enough
+    estimatedReportingGas = gasToReport * estimatedReportsPerMarket * 2
+    return(estimatedReportingGas)
+
+def getShareSettlementPerEthFeeInAttoeth(branchId, reportingWindow):
+    currentPerEthFee = self.shareSettlementPerEthFee[reportingWindow]
+    if (currentPerEthFee):
+        return(currentPerEthFee)
+    repMarketCapInAttoeth = self.getRepMarketCapInAttoeth(branchId)
+    targetRepMarketCapInAttoeth = self.getTargetRepMarketCapInAttoeth(branchId, reportingWindow)
+    previousPerEthFee = self.shareSettlementPerEthFee[reportingWindow - 1]
+    if (!previousPerEthFee):
+        previousPerEthFee = 1*10**16
+    currentPerEthFee = previousPerEthFee * targetRepMarketCapInAttoeth / repMarketCapInAttoeth
+    self.shareSettlementPerEthFee[reportingWindow] = currentPeriodPerEthFee
+    return(currentPerEthFee)
+
+def getRepMarketCapInAttoeth(branchId):
+    # TODO: get these from something like OasisDEX
+    lastBidEth = 5*10**20
+    lastBidRep = 1*10**20
+    lastAskEth = 20*10**9
+    lastAskRep = 4*10**9
+    repMarketCapInAttoeth = REPUTATION_TOKEN.totalSupply(branchId) * (lastBidEth + lastAskEth) / (lastBidRep + lastAskRep)
+    return(repMarketCapInAttoeth)
+
+def getTargetRepMarketCapInAttoeth(branchId, reportingWindow):
+    outstandingSharesAtCloseInAttoeth = self.getOutstandingSharesAtCloseInAttoeth(reportingWindow)
+    targetRepMarketCapInAttoeth = outstandingSharesAtCloseInAttoeth * 5
+    return(targetRepMarketCapInAttoeth)
+
+def getOutstandingSharesAtCloseInAttoeth(reportingWindow):
+    # TODO: events will need to store these somewhere (in aggregate) as markets close (look at totalSupply at time of market finalization)
+    outstandingSharesAtCloseInAttoeth = 100*10**18
+    return(outstandingSharesAtCloseInAttoeth)

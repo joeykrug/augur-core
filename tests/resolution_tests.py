@@ -164,6 +164,47 @@ def test_logReturn():
             assert(logged["returnArray"] == [5, 10, 15])
     test_logReturn()
 
+def test_closeMarket(contracts, state, t):
+
+
+def createBinaryEvent(contracts):
+    global eventCreationCounter
+    t = contracts._ContractLoader__tester
+    contracts.cash.publicDepositEther(value=fix(10000), sender=t.k1)
+    contracts.cash.approve(contracts.createEvent.address, fix(10000), sender=t.k1)
+    branch = 1010101
+    contracts.reputationFaucet.reputationFaucet(branch, sender=t.k1)
+    description = "test binary event"
+    expDate = 3000000002 + eventCreationCounter
+    eventCreationCounter += 1
+    fxpMinValue = fix(1)
+    fxpMaxValue = fix(2)
+    numOutcomes = 2
+    resolution = "http://lmgtfy.com"
+    resolutionAddress = t.a2
+    currency = contracts.cash.address
+    forkResolveAddress = contracts.forkResolution.address
+    return contracts.createEvent.publicCreateEvent(branch, description, expDate, fxpMinValue, fxpMaxValue, numOutcomes, resolution, resolutionAddress, currency, forkResolveAddress, sender=t.k1)
+
+def createBinaryMarket(contracts, eventID):
+    global eventCreationCounter
+    t = contracts._ContractLoader__tester
+    contracts.cash.approve(contracts.createMarket.address, fix(10000), sender=t.k1)
+    branch = 1010101
+    fxpTradingFee = 20000000000000001
+    tag1 = 123
+    tag2 = 456
+    tag3 = 789
+    extraInfo = "rabble rabble rabble"
+    currency = contracts.cash.address
+    return contracts.createMarket.publicCreateMarket(branch, fxpTradingFee, eventID, tag1, tag2, tag3, extraInfo, currency, sender=t.k1, value=fix(10000))
+
+def fix(n):
+    return n * 10**18
+
+def unfix(n):
+    return n / 10**18
+
 # def test_controller(contracts, state, t):
     ### Useful for controller testing
         # from ethereum import tester as t
@@ -181,7 +222,7 @@ def test_logReturn():
 
 if __name__ == '__main__':
     # src = os.path.join(os.getenv('AUGUR_CORE', os.path.join(os.getenv('HOME', '/home/ubuntu'), 'workspace')), 'src')
-    # contracts = ContractLoader(src, 'controller.se', ['mutex.se', 'cash.se', 'repContract.se'])
+    # contracts = ContractLoader(src, 'controller.se', ['mutex.se', 'cash.se', 'repContract.se', 'reputationFaucet.se'])
     # state = contracts._ContractLoader__state
     # t = contracts._ContractLoader__tester
     # test_refund(contracts, state, t)

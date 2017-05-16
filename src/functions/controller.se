@@ -3,7 +3,6 @@
 ### Controller - A contract for updating Augur via a REP weighted vote and storing a whitelist of contract addresses
 
 inset('../macros/refund.sem')
-inset('../macros/logReturn.sem')
 
 # Initializing the controller
     # First call the functions to set the registry values and whitelists and mode
@@ -149,6 +148,10 @@ def assertIsWhitelisted(address):
     if(self.whitelist[address] or msg.sender == self.owner):
         return(1)
     else:
+        ~invalid()
+
+def assertOnlySpecifiedCaller(callerAddress, allowedCallerContractName):
+    if (self.registry[allowedCallerContractName].value != callerAddress):
         ~invalid()
 
 def lookup(key):

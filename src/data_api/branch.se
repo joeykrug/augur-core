@@ -1,0 +1,73 @@
+# Copyright (C) 2015 Forecast Foundation OU, full GPL notice in LICENSE
+
+extern controller: [lookup:[int256]:int256, assertIsWhitelisted:[int256]:int256]
+
+extern market: [a:[]:_]
+
+BRANCHES_ACTIONS = self.controller.lookup('branchesActions')
+extern branches: [b:[]:_]
+
+EVENTS = self.controller.lookup('events')
+extern events: [c:[]:_]
+
+data controller
+data branchId
+data parentBranch
+# payouts against parentBranch.forkingMarket
+data parentPayouts[]
+# the market that terminates this branch in a fork (0 until a fork occurs)
+data forkingMarket
+
+def init():
+    self.controller = 0x0
+
+def any():
+    refund()
+
+def initialize(branchId, parentBranch, payouts: arr):
+    self.branchId = branchId
+    self.parentBranch = parentBranch
+    i = 0
+    while (i < len(payouts)):
+        self.parentPayouts[i] = payouts[i]
+        i += 1
+
+def fork(forkingMarket):
+    self.assertIsNotForked()
+    EVENTS.assertMarketIsAugurMarket(forkingMarket)
+    market.assertHasLimitedReportersOutcome()
+    market.assertHasLimitedReportersDispute()
+    market.assertHasAllReportersOutcome()
+    market.assertHasAllReportersDispute()
+    self.forkingMarket = forkingMarket
+
+
+####
+#### Getters
+####
+
+def getBranchId():
+    return(self.branchId)
+
+def getParentBranch():
+    return(self.parentBranch)
+
+def getForkingMarket():
+    return(self.forkingMarket)
+
+
+####
+#### Assertions
+####
+
+def assertIsForked():
+    if (not self.forkingMarket):
+        ~invalid()
+
+def assertIsNotForked():
+    if (self.forkingMarket):
+        ~invalid()
+
+def assertIsChildOf(parentBranch):
+    if (self.parentBranch != parentBranch):
+        ~invalid()

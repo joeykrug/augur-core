@@ -1,0 +1,208 @@
+# Copyright (C) 2015 Forecast Foundation OU, full GPL notice in LICENSE
+
+extern controller: [lookup:[int256]:int256, assertIsWhitelisted:[int256]:int256]
+
+BRANCHES = self.controller.lookup('branches')
+extern branchs: [a:[]:_]
+
+REPUTATION_TOKEN = self.controller.lookup('reputationToken')
+extern reputationToken: [transfer:[uint256, address, uint256]:_, transferFrom:[uint256,address,address,uint256]:_, balanceOf:[uint256,address]:uint256]
+
+REPORTING = self.controller.lookup('reporting')
+extern reporting: [noteUserReport:[uint256, uint256]:_]
+
+REGISTRATION_TOKEN = self.controller.lookup('registrationToken')
+extern registrationToken: [balanceOf:[uint256,uint256,uint256]:uint256]
+
+inset('../macros/refund.sem')
+inset('../macros/assertPrivateCall.sem')
+inset('../macros/safeMath.sem')
+
+data controller
+data market
+data branch
+# tokens[outcome][payoutNumerator][reporter]
+data tokens[][][2**160]
+# tokenSupply[outcome][payoutNumerator]
+data tokenSupply[][]
+# tokenSupply[outcome]
+data allPayoutNumeratorsSupply[]
+# winningPayoutNumerators[outcome]
+data winningPayoutNumerators[]
+
+def init():
+    self.controller = 0x0
+
+def any():
+    refund()
+
+def initialize(market, branch):
+    self.market = market
+    self.branch = branch
+
+def buy(payoutNumerators: arr, attorep):
+    reporter = msg.sender
+    self.market.assertCanBeReportedOn()
+    self.assertMarketIsNotDoneWithReporters()
+    self.assertReporterHasRegistrationToken(reporter)
+    self.assertBranchMatchesMarketBranch()
+    self.market.validatePayoutNumerators(payoutNumerators)
+    REPUTATION_TOKEN.transferFrom(self.branch, reporter, self, attorep)
+    self.privateCreateAndAssignTokens(payoutNumerators, reporter, attorep)
+    self.privateAdjustWinningPayoutNumerators(payoutNumerators)
+    REPORTING.noteUserReport(self.market, payoutNumerators, reporter)
+
+def transfer(outcome, payoutNumerator, destination, attotokens):
+    source = msg.sender
+    startingSourceTokens = self.tokens[outcome][payoutNumerator][source]
+    startingDestinationTokens = self.tokens[outcome][payoutNumerator][destination]
+    self.tokens[outcome][payoutNumerator][source] = safeSub(startingSourceTokens, attotokens)
+    self.tokens[outcome][payoutNumerator][destination] = safeAdd(startingDestinationTokens, attotokens)
+
+def redeem(payoutNumerators: arr, reporter):
+    # CONSIDER: it would be pretty easy for someone to migrate some wnining tokens to the wrong branch by including some incorrect payoutNumerators in the set; can we protect against that beyond just verifying that the set is reasonable?
+    self.market.validatePayoutNumerators(payoutNumerators)
+
+    # if this contract is for tokens purchased prior to a fork migration, redeem all tokens at face value
+    self.market.migrateThroughAllForks()
+    if (self.market.getBranch() != self.branch):
+        self.privateRedeemTokensAtFaceValue(payoutNumerators, reporter)
+        return
+
+    # if this contract is for a market that triggerd a fork, migrate REP to appropriate branch and then redeem it at face value
+    self.market.assertIsFinalized()
+    if (self.market.getBranch().getForkingMarket() == self.market):
+        self.privateRedeemTokensOnFork(payoutNumerators, reporter)
+        return
+
+    # for markets that resolve normally (non-fork) redeem correct tokens proportionately to pot
+    self.market.assertAreFinalPayoutNumerators(payoutNumerators)
+    self.privateRedeemWinningTokensProportionately(payoutNumerators, reporter)
+
+def extractBondHolderPayments():
+    self.market.assertIsFinalized()
+    # TODO: send losing REP to market until it has enough in coffers to cover bond rewards
+
+####
+#### Getters
+####
+
+def getWinningTokenSupply():
+    i = 0
+    winningSupply = 0
+    while (i < self.markets.getNumberOfOutcomes()):
+        payoutNumerator = self.winningPayoutNumerators[i]
+        winningSupply += self.tokenSupply[i][payoutNumerator]
+        i += 1
+    return(winningSupply)
+
+####
+#### Asserts
+####
+
+def assertBranchMatchesMarketBranch():
+    if (self.market.getBranch() != self.branch):
+        ~invalid()
+
+def assertMarketIsNotDoneWithReporters():
+    if (self.market.hasAllReporterPayoutNumerators()):
+        ~invalid()
+
+def assertReporterHasRegistrationToken(reporterAddress):
+    reportingWindow = self.market.getReportingWindow()
+    numberOfRegistrationTokens = REGISTRATION_TOKEN.balanceOf(self.branch, reportingWindow, reporterAddress)
+    if (numberOfRegistrationTokens < 1):
+        ~invalid()
+    return(1)
+
+def assertReporterHasReported(payoutNumerators, reporter):
+    outcome = 0
+    while (outcome < self.market.getNumberOfOutcomes()):
+        payoutNumerator = payoutNumerators[outcome]
+        if (not self.tokens[outcome][payoutNumerator][reporter]):
+            ~invalid()
+        outcome += 1
+
+####
+#### Private
+####
+
+def privateRedeemWinningTokensProportionately(payoutNumerators: arr, reporter):
+    assertPrivateCall()
+    reporterShareOfRep = 0
+    outcome = 0
+    while (outcome < self.market.numOutcomes):
+        payoutNumerator = payoutNumerators[outcome]
+        # deduct tokens from reporter
+        attotokens = self.tokens[outcome][payoutNumerator][reporter]
+        startingTokenSupply = self.tokenSupply[outcome][payoutNumerator]
+        startingAllPayoutNumeratorsSupply = self.allPayoutNumeratorsSupply[outcome]
+        remainingWinningShares = self.getWinningTokenSupply()
+        reputationToDistribute = REPUTATION_TOKEN.balanceOf(self.branch, self)
+        reporterShare = attotokens
+        self.tokens[outcome][payoutNumerator][reporter] = 0
+        self.tokenSupply[outcome][payoutNumerator] = safeSub(startingTokenSupply, attotokens)
+        self.allPayoutNumeratorsSupply[outcome] = safeSub(startingAllPayoutNumeratorsSupply, attotokens)
+        # give REP proportionate to rep_held_by_contract * tokens_being_destroyed / remaining_winning_shares
+        reporterShareOfRep += reputationToDistribute * reporterShare / remainingWinningShares
+        outcome += 1
+    REPUTATION_TOKEN.transfer(reporter, reporterShareOfRep)
+
+def privateRedeemTokensAtFaceValue(payoutNumerators: arr, reporter):
+    assertPrivateCall()
+    reputationTotal = 0
+    outcome = 0
+    while (outcome < self.market.numOutcomes):
+        payoutNumerator = payoutNumerators[outcome]
+        # deduct tokens from reporter
+        attotokens = self.tokens[outcome][payoutNumerator][reporter]
+        startingTokenSupply = self.tokenSupply[outcome][payoutNumerator]
+        startingAllPayoutNumeratorsSupply = self.allPayoutNumeratorsSupply[outcome]
+        self.tokens[outcome][payoutNumerator][reporter] = 0
+        self.tokenSupply[outcome][payoutNumerator] = safeSub(startingTokenSupply, attotokens)
+        self.allPayoutNumeratorsSupply[outcome] = safeSub(startingAllPayoutNumeratorsSupply, attotokens)
+        reputationTotal += attotokens
+        outcome += 1
+    # send REP at 1:1 ratio to reporter
+    REPUTATION_TOKEN.transfer(self.branch, reporter, reputationTotal)
+
+def privateRedeemTokensOnFork(payoutNumerators: arr, reporter):
+    assertPrivateCall()
+    branchWithThesePayoutNumerators = BRANCHES.getOrCreateBranch(self.branch, payoutNumerators)
+    attotokens = 0
+    outcome = 0
+    while (outcome < self.market.numOutcomes):
+        payoutNumerator = payoutNumerators[outcome]
+        attotokens += tokens[outcome][payoutNumerator][reporter]
+        # FIXME: for cleanliness, consistency and clarity, we should also deduct from the various totals as well
+        tokens[outcome][reporter] = 0
+        outcome +=1
+    REPUTATION_TOKEN.migrate(self.branch, branchWithThesePayoutNumerators, attotokens)
+    REPUTATION_TOKEN.transfer(branchWithThesePayoutNumerators, reporter, attotokens)
+
+def privateCreateAndAssignTokens(payoutNumerators, reporter, attotokens):
+    assertPrivateCall()
+    outcome = 0
+    while (outcome < self.market.getNumberOfOutcomes()):
+        payoutNumerator = payoutNumerators[outcome]
+        proportionedToken = attotokens * payoutNumerator / self.market.getPayoutDenominator()
+        # FIXME: at the moment, we allow people to buy outcome sets (that may cost more than 1) for amounts not perfectly divisible by payoutDivisor, resulting in minor amounts of lost REP. either fix this or thoroughly evaluate all of the possible scenarios in which this lost REP could impact the system
+        startingAttotoken = self.tokens[outcome][payoutNumerator][reporter]
+        startingTokenSupply = self.tokenSupply[outcome][payoutNumerator]
+        startingAllPayoutNumeratorsSupply = self.allPayoutNumeratorsSupply[outcome]
+        self.tokens[outcome][payoutNumerator][reporter] = safeAdd(startingAttotoken, proportionedToken)
+        self.tokenSupply[outcome][payoutNumerator] = safeAdd(startingTokenSupply, proportionedToken)
+        self.allPayoutNumeratorsSupply[outcome] = safeAdd(startingAllPayoutNumeratorsSupply, proportionedToken)
+        outcome += 1
+
+def privateAdjustWinningPayoutNumerators(payoutNumerators):
+    assertPrivateCall()
+    outcome = 0
+    while (outcome < self.market.getNumberOfOutcomes()):
+        payoutNumerator = payoutNumerators[outcome]
+        thisPayoutNumeratorVolume = self.tokenSupply[outcome][payoutNumerator]
+        currentWinningPayoutNumerator = self.winningPayoutNumerators[outcome]
+        currentWinningPayoutNumeratorVolume = self.tokenSupply[outcome][payoutNumerator]
+        if (thisPayoutNumeratorVolume > currentWinningPayoutNumeratorVolume):
+            self.winningPayoutNumerators[outcome] = payoutNumerator
+        outcome += 1
